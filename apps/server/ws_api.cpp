@@ -1,15 +1,52 @@
+#include <cstdint>
 #include "ws_api.h"
 
 #include "breeze/audio.h"
 #include "breeze/generation.h"
 
 #include <atomic>
+#include <cctype>
 #include <condition_variable>
 #include <cstdio>
 #include <deque>
 #include <thread>
 
 namespace breeze {
+
+// appends a unicode code point as utf-8
+static void utf8_append(std::string & out, uint32_t cp) {
+    if (cp < 0x80) {
+        out += (char) cp;
+    } else if (cp < 0x800) {
+        out += (char) (0xC0 | (cp >> 6));
+        out += (char) (0x80 | (cp & 0x3F));
+    } else if (cp < 0x10000) {
+        out += (char) (0xE0 | (cp >> 12));
+        out += (char) (0x80 | ((cp >> 6) & 0x3F));
+        out += (char) (0x80 | (cp & 0x3F));
+    } else {
+        out += (char) (0xF0 | (cp >> 18));
+        out += (char) (0x80 | ((cp >> 12) & 0x3F));
+        out += (char) (0x80 | ((cp >> 6) & 0x3F));
+        out += (char) (0x80 | (cp & 0x3F));
+    }
+}
+
+// reads four hex digits starting at i, -1 if there are none
+static int json_hex4(const std::string & s, size_t i) {
+    if (i + 4 > s.size()) return -1;
+    int v = 0;
+    for (size_t k = i; k < i + 4; k++) {
+        const char c = s[k];
+        int d;
+        if (c >= '0' && c <= '9') d = c - '0';
+        else if (c >= 'a' && c <= 'f') d = c - 'a' + 10;
+        else if (c >= 'A' && c <= 'F') d = c - 'A' + 10;
+        else return -1;
+        v = v * 16 + d;
+    }
+    return v;
+}
 
 // the messages are small flat objects, so pulling one field out beats vendoring a json parser
 static std::string json_str(const std::string & msg, const char * key) {
@@ -28,7 +65,25 @@ static std::string json_str(const std::string & msg, const char * key) {
             if (n == 'n') out += '\n';
             else if (n == 't') out += '\t';
             else if (n == 'r') out += '\r';
-            else if (n == 'u') { i += 4; }
+            else if (n == 'u') {
+                // \uXXXX is valid json and used to be silently dropped here, so any client that
+                // escapes non-ascii (python's json.dumps does by default) lost every non-ascii
+                // character, umlauts included
+                const int hi = json_hex4(msg, i + 1);
+                if (hi < 0) { continue; }
+                i += 4;
+                uint32_t cp = (uint32_t) hi;
+                // join a surrogate pair (emoji and everything else from U+10000 up)
+                if (hi >= 0xD800 && hi <= 0xDBFF && i + 6 < msg.size()
+                    && msg[i + 1] == '\\' && msg[i + 2] == 'u') {
+                    const int lo = json_hex4(msg, i + 3);
+                    if (lo >= 0xDC00 && lo <= 0xDFFF) {
+                        cp = 0x10000 + (((uint32_t) hi - 0xD800) << 10) + ((uint32_t) lo - 0xDC00);
+                        i += 6;
+                    }
+                }
+                utf8_append(out, cp);
+            }
             else out += n;
             continue;
         }
@@ -75,27 +130,60 @@ static bool sentence_end(const std::string & s, size_t i) {
     return false;
 }
 
-// moves whole sentences out of buf, leaving a trailing partial behind unless force is set
+// letters and digits, utf-8 continuation bytes not counted (an umlaut counts as one)
+static int spoken_chars(const std::string & s) {
+    int n = 0;
+    for (unsigned char c : s)
+        if ((c & 0xC0) != 0x80 && (c >= 0x80 || std::isalnum(c))) n++;
+    return n;
+}
+
+// a sentence shorter than this (in letters) does not become a piece of its own
+static const int kMinPiece = 20;
+
+// moves whole sentences out of buf, leaving a trailing partial behind unless force is set.
+//
+// every sentence becomes a piece of its own. everything up to the last sentence end used to go out
+// as ONE piece, and out of several sentences the model likes to drop the last one. short sentences
+// ("Sure!", "Exactly.") are not sent alone though, on their own the model tends to end them right
+// away with EOS. they wait in the buffer for the next sentence and go out together with it. only
+// at the end (force) does a short remainder go out alone
 static std::vector<std::string> drain(std::string & buf, int budget, bool force) {
     std::vector<std::string> out;
-    size_t cut = 0;
-    for (size_t i = 0; i < buf.size(); i++)
-        if (sentence_end(buf, i)) cut = i + ((unsigned char) buf[i] < 0x80 ? 1 : 3);
+    auto emit = [&](const std::string & s) {
+        for (std::string & p : split_text(s, budget)) {
+            while (!p.empty() && (p.front() == ' ' || p.front() == '\n')) p.erase(p.begin());
+            if (!p.empty()) out.push_back(p);
+        }
+    };
 
+    size_t start = 0, taken = 0;
+    std::string cur;
+    for (size_t i = 0; i < buf.size(); i++) {
+        if (!sentence_end(buf, i)) continue;
+        const size_t e = i + ((unsigned char) buf[i] < 0x80 ? 1 : 3);
+        cur += buf.substr(start, e - start);
+        start = e;
+        if (spoken_chars(cur) >= kMinPiece) {
+            emit(cur);
+            cur.clear();
+            taken = e;
+        }
+    }
+    if (force) {
+        emit(buf.substr(taken));
+        buf.clear();
+        return out;
+    }
     // nothing finished but the buffer is already long enough to speak, so break it on a space
-    if (!cut && !force && (int) buf.size() > budget) {
+    if ((int) (buf.size() - taken) > budget) {
         const size_t sp = buf.rfind(' ');
-        if (sp != std::string::npos) cut = sp + 1;
+        if (sp != std::string::npos && sp >= taken) {
+            emit(buf.substr(taken, sp + 1 - taken));
+            taken = sp + 1;
+        }
     }
-    if (force && !cut) cut = buf.size();
-    if (!cut) return out;
-
-    std::string ready = buf.substr(0, cut);
-    buf.erase(0, cut);
-    for (std::string & p : split_text(ready, budget)) {
-        while (!p.empty() && p.front() == ' ') p.erase(p.begin());
-        if (!p.empty()) out.push_back(p);
-    }
+    buf.erase(0, taken);
     return out;
 }
 
@@ -172,7 +260,8 @@ static void speaker(WsConn & conn, Session & s, std::mutex & gpu) {
 
 static void handle_start(WsConn & conn, Session & s, const std::string & msg, BreezeModel & model,
                          MimiCodec & codec, VoiceStore & store, int chunk_first, int chunk_max,
-                         int split_chars) {
+                         int split_chars,
+                         float def_speed, int def_head, int def_tail, int def_pause) {
     GenRequest g;
     g.instruction = json_str(msg, "instruction");
     if (g.instruction.empty()) g.instruction = "Speak clearly and naturally.";
@@ -190,6 +279,15 @@ static void handle_start(WsConn & conn, Session & s, const std::string & msg, Br
         return;
     }
 
+    g.rolling_anchor = json_num(msg, "rolling_anchor", 0) != 0;
+    g.carry_cache = json_num(msg, "carry_cache", 0) != 0;
+    g.carry_eos = json_num(msg, "carry_eos", 1) != 0;
+    g.cache_seq = (int) json_num(msg, "cache_seq", 2048);
+    g.speed = (float) json_num(msg, "speed", def_speed);
+    g.trim_head_ms = (int) json_num(msg, "trim_head_ms", def_head);
+    g.trim_tail_ms = (int) json_num(msg, "trim_tail_ms", def_tail);
+    g.pause_ms = (int) json_num(msg, "pause_ms", def_pause);
+
     std::lock_guard<std::mutex> lock(s.mu);
     s.instruction = g.instruction;
     s.budget = (int) json_num(msg, "split_chars", split_chars);
@@ -204,7 +302,8 @@ static void handle_start(WsConn & conn, Session & s, const std::string & msg, Br
 }
 
 void ws_connection(WsConn & conn, BreezeModel & model, MimiCodec & codec, VoiceStore & store,
-                   std::mutex & gpu, int chunk_first, int chunk_max, int split_chars) {
+                   std::mutex & gpu, int chunk_first, int chunk_max, int split_chars,
+                   float def_speed, int def_head, int def_tail, int def_pause) {
     Session s;
     std::thread worker([&] { speaker(conn, s, gpu); });
     event(conn, "ready", "\"sample_rate\":24000,\"format\":\"s16le\"");
@@ -216,7 +315,8 @@ void ws_connection(WsConn & conn, BreezeModel & model, MimiCodec & codec, VoiceS
         const std::string type = json_str(msg, "type");
 
         if (type == "start") {
-            handle_start(conn, s, msg, model, codec, store, chunk_first, chunk_max, split_chars);
+            handle_start(conn, s, msg, model, codec, store, chunk_first, chunk_max, split_chars,
+                         def_speed, def_head, def_tail, def_pause);
             continue;
         }
         if (!s.started) {

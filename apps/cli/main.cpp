@@ -1,3 +1,4 @@
+#include <cstdlib>
 #include "breeze/audio.h"
 #include "breeze/generation.h"
 #include "breeze/model.h"
@@ -37,7 +38,14 @@ static void usage() {
            "  --chunk-first <n>   frames in the first streamed chunk (default 4)\n"
            "  --chunk-max <n>     frames the chunk ramps up to (default 25)\n"
            "  --timings           print a stage by stage latency breakdown\n"
-           "  --cpu               force CPU backend\n");
+           "  --cpu               force CPU backend\n"
+           "  --rolling-anchor    condition each piece on the previous one\n"
+           "  --carry-cache       keep the kv cache across pieces (experimental)\n"
+           "  --threads <n>       CPU threads (default 4; on hybrid CPUs pin to P-cores)\n"
+           "  --speed <f>         speech rate, 1.0 unchanged, pitch preserved\n"
+           "  --trim-head-ms <n>  cut n ms off the start of every piece\n"
+           "  --trim-tail-ms <n>  cut n ms off the end of every piece\n"
+           "  --pause-ms <n>      n ms of silence between two pieces (long text is split at --split-chars)\n");
 }
 
 int main(int argc, char ** argv) {
@@ -69,6 +77,17 @@ int main(int argc, char ** argv) {
         else if (a == "--rep-penalty") req.repetition_penalty = (float) atof(arg(argc, argv, i, "--rep-penalty"));
         else if (a == "--max-new") req.max_new_tokens = atoi(arg(argc, argv, i, "--max-new"));
         else if (a == "--split-chars") req.split_chars = atoi(arg(argc, argv, i, "--split-chars"));
+        else if (a == "--rolling-anchor") req.rolling_anchor = true;
+        else if (a == "--carry-cache") req.carry_cache = true;
+#ifdef _WIN32
+        else if (a == "--threads") _putenv_s("BREEZE_THREADS", arg(argc, argv, i, "--threads"));
+#else
+        else if (a == "--threads") setenv("BREEZE_THREADS", arg(argc, argv, i, "--threads"), 1);
+#endif
+        else if (a == "--speed") req.speed = (float) atof(arg(argc, argv, i, "--speed"));
+        else if (a == "--trim-head-ms") req.trim_head_ms = atoi(arg(argc, argv, i, "--trim-head-ms"));
+        else if (a == "--trim-tail-ms") req.trim_tail_ms = atoi(arg(argc, argv, i, "--trim-tail-ms"));
+        else if (a == "--pause-ms") req.pause_ms = atoi(arg(argc, argv, i, "--pause-ms"));
         else if (a == "--chunk-first") req.chunk_first = atoi(arg(argc, argv, i, "--chunk-first"));
         else if (a == "--chunk-max") req.chunk_max = atoi(arg(argc, argv, i, "--chunk-max"));
         else if (a == "--output") output = arg(argc, argv, i, "--output");

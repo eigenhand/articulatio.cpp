@@ -16,6 +16,12 @@ struct ServerOptions {
     int chunk_first = 4;
     int chunk_max = 25;
     int split_chars = 600; // 0 keeps long text in a single pass
+    // post-processing defaults for this server. any request may override them, whatever a request
+    // leaves out falls back to these
+    float speed = 1.0f;
+    int trim_head_ms = 0;
+    int trim_tail_ms = 0;
+    int pause_ms = 0;
 };
 
 int run_server(const ServerOptions & opts);

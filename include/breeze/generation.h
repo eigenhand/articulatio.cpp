@@ -35,6 +35,38 @@ struct GenRequest {
     // long text is generated in pieces of about this many characters, 0 keeps it in one pass.
     // the model loses track of the text somewhere past a minute of audio, so pieces stay under that
     int split_chars = 600;
+    // rolling anchor: each piece is conditioned on the PREVIOUSLY GENERATED one instead of always
+    // on the original clip. keeps the delivery together across sentence boundaries because the
+    // context moves along. the price is that over many pieces the voice can slowly drift away from
+    // the original, so it is off by default. costs nothing extra, the piece's codes are already
+    // there and there is no codec round trip
+    bool rolling_anchor = false;
+    // carry the cache across piece boundaries: the next piece only appends its new text to the
+    // existing kv cache instead of prefilling the reference and prompt again. the model then sees
+    // its own previously generated frames as context, which is real continuation rather than just
+    // a swapped reference.
+    // caution: the layout [ref][text1][audio1][text2] never occurred like this in training.
+    // experimental
+    bool carry_cache = false;
+    // with a carried cache, close every piece with an EOS frame, like every audio span in training.
+    // without it the next text follows straight on from the last audio frame, the model then takes
+    // the previous piece as unfinished and makes up for whatever it left out later on, audible as
+    // sentences in the wrong order. turning it off is only meant for comparison
+    bool carry_eos = true;
+    // upper limit of the carried cache in positions. 2048 is about 470 MB
+    // (28 layers x k/v x 128 x 8 x F32) and covers a good two minutes
+    int cache_seq = 2048;
+    // speech rate. 1.0 unchanged, >1 faster, <1 slower. true time stretching (WSOLA), the pitch
+    // stays. usable from about 0.7 to 1.5, beyond that the processing becomes audible
+    float speed = 1.0f;
+    // milliseconds cut off the start and the end of every piece, meant for onset and decay
+    // transients at the piece boundaries
+    int trim_head_ms = 0;
+    int trim_tail_ms = 0;
+    // silence between two pieces, in milliseconds. the websocket makes every sentence a piece of
+    // its own, so there this is the pause between sentences. none comes before the first piece of
+    // a session
+    int pause_ms = 0;
 };
 
 // break text on sentence boundaries into pieces worth roughly budget characters, cjk counted heavier.
@@ -91,6 +123,10 @@ public:
 
     void set_instruction(const std::string & s) { m_req.instruction = s; }
 
+    // frees the carried cache. begin() calls this itself
+    void end();
+    ~GenSession() { end(); }
+
     // with no clip to clone the first piece becomes the reference, so it wants to stay short
     bool needs_anchor() const { return m_codes.empty(); }
 
@@ -103,6 +139,13 @@ private:
     int m_frames = 0;
     uint32_t m_piece = 0;
     std::chrono::steady_clock::time_point m_start;
+    // only allocated with carry_cache: the state that lives on across pieces
+    BackboneState m_st_c, m_st_u;
+    bool m_state_live = false;
+    // last frames of the previous piece, used only as decoding context. without them the vocoder
+    // starts cold at every piece boundary, its causal convolutions and sliding window have nothing
+    // behind them, and that is audible as clicks or scraps of sound at the start of a piece
+    std::vector<int> m_voc_tail;
 };
 
 }

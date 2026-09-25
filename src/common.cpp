@@ -1,7 +1,9 @@
 #include "breeze/common.h"
 #include "ggml-cpu.h"
 
+#include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 
 namespace breeze {
@@ -14,6 +16,19 @@ void Backend::init(bool prefer_gpu) {
     if (!backend) {
         backend = ggml_backend_cpu_init();
         is_gpu = false;
+        // ggml creates the cpu backend with GGML_DEFAULT_N_THREADS = 4, and that stays the default.
+        // measured on an i5-13600KF (6 P + 8 E cores): 4 threads 0.24x realtime, 6 on the P cores
+        // 0.28x, 10 only 0.15x, 14 as low as 0.02x. ggml waits for the slowest core on every op,
+        // and E cores hold up the 15 small depth steps per frame, so "all cores" as the default
+        // would be a step backwards. override it with BREEZE_THREADS (cli: --threads), ideally
+        // together with taskset pinning it to the P cores
+        int n = GGML_DEFAULT_N_THREADS;
+        if (const char * e = std::getenv("BREEZE_THREADS")) {
+            const int w = std::atoi(e);
+            if (w > 0) n = w;
+        }
+        ggml_backend_cpu_set_n_threads(backend, n);
+        cpu_threads = n;
     }
     alloc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(backend));
 }

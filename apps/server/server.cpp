@@ -71,7 +71,8 @@ int run_server(const ServerOptions & opts) {
     const int ws_port = opts.ws_port == 0 ? opts.port + 1 : opts.ws_port;
     if (ws_port > 0) {
         const bool up = ws.start(opts.host, ws_port, [&](WsConn & c) {
-            ws_connection(c, model, codec, store, *mutex, opts.chunk_first, opts.chunk_max, opts.split_chars);
+            ws_connection(c, model, codec, store, *mutex, opts.chunk_first, opts.chunk_max, opts.split_chars,
+                          opts.speed, opts.trim_head_ms, opts.trim_tail_ms, opts.pause_ms);
         });
         if (up) printf("websocket on ws://%s:%d\n", opts.host.c_str(), ws_port);
         else fprintf(stderr, "could not open the websocket port %d\n", ws_port);
@@ -102,6 +103,20 @@ int run_server(const ServerOptions & opts) {
         g.repetition_penalty = (float) atof(field(req, "repetition_penalty", "0").c_str());
         g.max_new_tokens = atoi(field(req, "max_new_tokens", "0").c_str());
         g.split_chars = atoi(field(req, "split_chars", std::to_string(opts.split_chars)).c_str());
+        // rolling anchor: condition each piece on the one generated before it instead of always
+        // on the original clip. keeps the delivery together across sentence boundaries, but can
+        // slowly drift away from the original
+        g.rolling_anchor = field(req, "rolling_anchor", "0") == "1"
+                        || field(req, "rolling_anchor", "0") == "true";
+        // carry_cache keeps the kv cache going across piece boundaries
+        g.carry_cache = field(req, "carry_cache", "0") == "1"
+                     || field(req, "carry_cache", "0") == "true";
+        g.carry_eos = field(req, "carry_eos", "1") != "0" && field(req, "carry_eos", "1") != "false";
+        g.cache_seq = atoi(field(req, "cache_seq", "2048").c_str());
+        g.speed = (float) atof(field(req, "speed", std::to_string(opts.speed)).c_str());
+        g.trim_head_ms = atoi(field(req, "trim_head_ms", std::to_string(opts.trim_head_ms)).c_str());
+        g.trim_tail_ms = atoi(field(req, "trim_tail_ms", std::to_string(opts.trim_tail_ms)).c_str());
+        g.pause_ms = atoi(field(req, "pause_ms", std::to_string(opts.pause_ms)).c_str());
         g.chunk_first = opts.chunk_first;
         g.chunk_max = opts.chunk_max;
         if (req.has_file("ref_audio")) {

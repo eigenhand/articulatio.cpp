@@ -12,6 +12,7 @@
 | [c-api.md](c-api.md) | The `breeze.h` C API, lifecycle, callbacks, thread safety |
 | [ctypes.md](ctypes.md) | Binding the shared library from Python with `ctypes` |
 | [architecture.md](architecture.md) | The four model stages and how the C++ mirrors the reference |
+| [inference.md](inference.md) | The inference flow step by step, the extensions added in this fork, measured numbers |
 
 ## Quick orientation
 

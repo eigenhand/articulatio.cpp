@@ -10,6 +10,10 @@ struct BackboneState {
     KVCache kv;
     int pos = 0;
     void init(BreezeModel & m, int max_seq);
+    // true if the cache could actually be allocated. a failed ggml_backend_alloc_ctx_tensors leaves
+    // a null buffer, and the next access would otherwise take the whole process down with it
+    // (GGML_ASSERT in ggml_view_3d)
+    bool ok() const { return kv.buffer != nullptr; }
     void reset() { kv.reset(); pos = 0; }
     void free() { kv.free(); }
 };

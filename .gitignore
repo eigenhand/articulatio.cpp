@@ -60,3 +60,6 @@ voices/
 /.agents
 /.claude
 skills-lock.json
+
+# macOS
+.DS_Store

@@ -1,15 +1,17 @@
 <div align="center">
 
-# Breeze-TTS-2.cpp
+# articulatio.cpp
 
-**Bilingual instruction following text to speech in C++ and GGUF.**
-Voice design, voice cloning, voice direction and experimental voice conversion,
-streaming at better than realtime on a mid range GPU.
+*A fork of [Breeze-TTS-2.cpp](https://github.com/HoppouAI/Breeze-TTS-2.cpp) for Articulatio-DE (German).*
+
+**Real-time German text-to-speech in C++ and GGUF.**
+Streams the first audio after about half a second and speaks faster than real time, with cloned
+German as intelligible as real recordings.
 
 <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache_2.0-1f6feb?style=for-the-badge" alt="License"></a>
 <img src="https://img.shields.io/badge/C%2B%2B-17-00599C?style=for-the-badge&logo=cplusplus&logoColor=white" alt="C++17">
 <img src="https://img.shields.io/badge/Vulkan-AC162C?style=for-the-badge&logo=vulkan&logoColor=white" alt="Vulkan">
-<a href="https://huggingface.co/HoppouAI/Breeze-TTS-2.cpp"><img src="https://img.shields.io/badge/GGUF_weights-FFD21E?style=for-the-badge&logo=huggingface&logoColor=black" alt="GGUF weights"></a>
+<a href="https://huggingface.co/eigenhand/Articulatio-DE-GGUF"><img src="https://img.shields.io/badge/Articulatio--DE_GGUF-FFD21E?style=for-the-badge&logo=huggingface&logoColor=black" alt="Articulatio-DE GGUF weights"></a>
 
 </div>
 
@@ -18,14 +20,94 @@ running on [ggml](https://github.com/ggml-org/ggml). The Vulkan backend means it
 AMD and Intel GPUs, and it falls back to CPU. Ships a CLI, a streaming HTTP and WebSocket server with
 a web UI, and a plain C shared library for bindings.
 
-English and Mandarin, 24 kHz, roughly 1.2x realtime at Q8_0 on an RTX 3060.
+With the base model it speaks English and Mandarin at 24 kHz, roughly 1.2x realtime at Q8_0 on an
+RTX 3060 (upstream measurement).
+
+## Articulatio-DE at a glance
+
+[Articulatio-DE](https://huggingface.co/eigenhand/Articulatio-DE) is a German (and English) fine-tune
+of Breeze TTS 2; this fork is built to serve it.
+
+| | |
+| --- | --- |
+| Word error rate, cloned German voices | 4.2 % (the real recordings of the same sentences: 4.4 %) |
+| Speed, Q8_0 with Vulkan | RTF 0.49 on an RTX 4070, 0.69 on an AMD Radeon AI PRO R9700 (below 1 is faster than real time) |
+| First audio when streaming | about half a second |
+| VRAM | about 4 GB for Q8_0, 3 GB for Q4_K |
+
+Method and all measurements: [articulatio-training/docs/RESULTS.md](https://github.com/eigenhand/articulatio-training/blob/main/docs/RESULTS.md).
+Chinese no longer works with Articulatio-DE, and vocal events are largely lost (see *Vocal events*).
+
+### Quick start (German)
+
+```bash
+hf download eigenhand/Articulatio-DE-GGUF articulatio-de-q8_0.gguf --local-dir models
+build/breeze-server models/articulatio-de-q8_0.gguf --port 8080 --webui --split-chars 120 --pause-ms 150
+```
+
+Open http://localhost:8080/ for the web UI. Keep `--split-chars` small: in one long piece the model
+drifts after about 20 seconds, sentence by sentence it stays stable. The WebSocket API splits into
+sentences by itself. For text with digits, units or abbreviations, put the German text frontend
+(`tools/german-frontend`) in front of the server.
+
+## Changes in this fork
+
+This is a fork of [HoppouAI/Breeze-TTS-2.cpp](https://github.com/HoppouAI/Breeze-TTS-2.cpp) that serves
+Articulatio-DE through the streaming server. It adds:
+
+- **Carrying the KV cache across pieces** (`carry_cache`, experimental, off by default). Later pieces
+  only append their new text to the backbone's cache instead of prefilling the reference and prompt
+  again, so the model continues from its own audio. Each piece is closed in the cache with an EOS
+  frame, as every audio span is in training (`carry_eos`, on by default). The cache is sized once per
+  session (`cache_seq`, default 2048 positions, about 470 MB per cache). A capacity guard starts over
+  from the reference when the next piece might not fit and ends a piece before it would write past
+  the end, and if the allocation fails the session falls back to a cache per piece instead of
+  aborting.
+- **Rolling anchor** (`rolling_anchor`, off by default): each piece uses the previously generated
+  piece as its reference, rather than the original reference clip.
+- **One piece per sentence on the WebSocket.** Text is no longer sent as one piece up to the last
+  sentence end; every sentence becomes its own piece, and sentences shorter than 20 letters are merged
+  into the next one.
+- **Minimum length before EOS.** EOS is blocked for the first `max(4, letters/2)` steps of a piece, so
+  the model cannot swallow a short sentence by ending it right away.
+- **Vocoder context across piece boundaries.** The last frames of the previous piece are decoded as a
+  lead-in that is never output, so the vocoder does not start cold (and click) at every piece.
+- **Post-processing:** `speed` changes the speech rate by WSOLA time stretching with the pitch
+  preserved, `trim_head_ms` / `trim_tail_ms` cut the start and end of every piece, and `pause_ms`
+  inserts silence between pieces (on the WebSocket, between sentences).
+- **JSON `\uXXXX` decoding fix.** The WebSocket's JSON reader used to drop `\uXXXX` escapes, so clients
+  that escape non-ASCII (Python's `json.dumps` does by default) lost every non-ASCII character, such
+  as the German ä, ö, ü and ß. It now decodes them, surrogate pairs included.
+- **German text frontend** (`tools/german-frontend`, Python): because the model reads digits and
+  symbols unreliably, it writes out numbers, ordinals, dates, units, abbreviations and simple formulas
+  in German and removes Markdown and emoji, as a library or as a proxy in front of the server.
+- **CPU thread count override:** `BREEZE_THREADS` (or `--threads` in the CLI) replaces ggml's default
+  of 4 threads on the CPU backend.
+- **New flags and fields:** `breeze-cli` gains `--rolling-anchor`, `--carry-cache`, `--threads`,
+  `--speed`, `--trim-head-ms`, `--trim-tail-ms` and `--pause-ms`. `breeze-server` gains `--speed`,
+  `--trim-head-ms`, `--trim-tail-ms` and `--pause-ms` as server-wide defaults. HTTP requests and the
+  WebSocket `start` message accept `rolling_anchor`, `carry_cache`, `carry_eos`, `cache_seq`, `speed`,
+  `trim_head_ms`, `trim_tail_ms` and `pause_ms`.
+
+The new options default to upstream behavior; the per-sentence pieces on the WebSocket, the minimum
+length before EOS and the vocoder context across pieces are always on. The C API does not expose the
+new options. [docs/inference.md](docs/inference.md) walks through the inference flow and these
+changes, with measurements.
 
 ## Demo
 
-Voice design, cloning, direction, vocal event tags, and voice conversion on a sung recording. Every
-clip was generated on one RTX 3060, faster than realtime, and nothing was cherry picked.
+https://github.com/user-attachments/assets/aaee58ac-1228-48b6-b9f9-7ac4150b0338
 
-https://github.com/user-attachments/assets/b63e4664-497f-4bac-b9e2-50bf571df30a
+13 s of German in a voice the model created itself, one sentence per piece, `speed` 1.25 with the pitch
+preserved and 150 ms between sentences: *"Guten Morgen! Heute ist Donnerstag, der fünfundzwanzigste
+September. Draußen sind es achtzehn Grad, am Nachmittag zieht von Westen ein Gewitter auf. Vergiss also
+den Regenschirm nicht, wenn du später noch zum Bahnhof fährst."*
+
+Synthetic speech generated with Articulatio-DE (GGUF Q8_0, articulatio.cpp); the voice belongs to no real
+person. Derived from Breeze TTS 2 by BreezeBlue and licensed for research and non-commercial use only: the
+clip is an output of the model and falls under the
+[BreezeBlue Research and Non-Commercial License](https://huggingface.co/BreezeBlue/Breeze-TTS-2/blob/main/LICENSE),
+not under the Apache 2.0 license of this repository.
 
 ## Documentation
 
@@ -57,13 +139,15 @@ https://github.com/user-attachments/assets/b63e4664-497f-4bac-b9e2-50bf571df30a
 ## Build
 
 ```
-git clone --recursive https://github.com/HoppouAI/Breeze-TTS-2.cpp
-cd Breeze-TTS-2.cpp
+git clone --recursive https://github.com/eigenhand/articulatio.cpp.git
+cd articulatio.cpp
 cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
 ```
 
-Add `-DBREEZE_VULKAN=OFF` for a CPU only build. Outputs are `breeze-cli`, `breeze-convert`,
+Add `-DBREEZE_VULKAN=OFF` for a build without Vulkan (CPU, or Metal on macOS). On Apple Silicon the
+Metal path is slow (about RTF 4.4 on an M3 Pro); use [articulatio-mlx](https://github.com/eigenhand/articulatio-mlx)
+there instead. Outputs are `breeze-cli`, `breeze-convert`,
 `breeze-server`, `breeze-quantize` and the shared library. See [docs/build.md](docs/build.md).
 
 ### Nix
@@ -94,7 +178,12 @@ breeze-server        # run the server
 
 </div>
 
-Prebuilt GGUFs are on the Hub at
+**Articulatio-DE** (German): Q8_0 and Q4_K GGUFs are at
+[eigenhand/Articulatio-DE-GGUF](https://huggingface.co/eigenhand/Articulatio-DE-GGUF) and run with this
+fork like the base model. Only these two variants are published; the table below lists the variants of
+the base model.
+
+Prebuilt GGUFs of the base model are on the Hub at
 [HoppouAI/Breeze-TTS-2.cpp](https://huggingface.co/HoppouAI/Breeze-TTS-2.cpp), or convert them
 yourself. The download must include the `audio_tokenizer/` directory, which holds the vocoder.
 
@@ -150,7 +239,7 @@ the server and the web UI, and cut time to first audio from around 900 ms to aro
 
 Inline tags in round brackets produce non speech sounds. `(laugh)`, `(sigh)`, `(cough)` and
 `(clears throat)` are the reliable ones, with `[笑]` and `[叹气]` on the Chinese side, but the tag
-vocabulary is **free form**. The model was trained on descriptive tags rather than a fixed token list,
+vocabulary is **open**: the model was trained on descriptive tags rather than a fixed token list,
 so things like `(whispering)`, `(gasp)` or `(nervous chuckle)` will often work.
 
 The catch is that at the default `--cfg-scale 1.0` the model treats a tag as a suggestion and usually
@@ -165,6 +254,9 @@ build/breeze-cli breeze-tts-2-q8_0.gguf \
   --instruction "An anxious man trying to sound casual." \
   --cfg-scale 2.5 --output event.wav
 ```
+
+**Articulatio-DE has largely lost vocal events:** in German, tags such as `(laugh)` rarely produce the
+sound, because the fine-tune was trained on plain read speech.
 
 ## Voice conversion (experimental)
 
@@ -256,6 +348,6 @@ the only external dependency.
 
 ## License
 
-Source code is [Apache 2.0](LICENSE). The Breeze TTS 2 model weights are governed by the BreezeBlue
+Source code is [Apache 2.0](LICENSE), see also [NOTICE](NOTICE). The Breeze TTS 2 model weights and fine-tunes of them (including Articulatio-DE) are governed by the BreezeBlue
 Research and Non-Commercial License. You are responsible for complying with the weight license and for
 obtaining consent for any reference audio or voices you use.

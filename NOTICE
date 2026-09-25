@@ -1,0 +1,41 @@
+Breeze-TTS-2.cpp (modified version)
+
+This product is a modified version of Breeze-TTS-2.cpp by HoppouAI
+(https://github.com/HoppouAI/Breeze-TTS-2.cpp), Copyright 2026 HoppouAI,
+licensed under the Apache License, Version 2.0 (see LICENSE).
+
+Modifications copyright 2026 Christoph Lindl-Guk (eigenhand)
+The modifications are licensed under the Apache License, Version 2.0 as well.
+
+Files modified in this version:
+
+  .gitignore
+  README.md
+  apps/cli/main.cpp
+  apps/server/main.cpp
+  apps/server/server.cpp
+  apps/server/server.h
+  apps/server/ws_api.cpp
+  apps/server/ws_api.h
+  docs/README.md
+  include/breeze/backbone.h
+  include/breeze/common.h
+  include/breeze/generation.h
+  src/common.cpp
+  src/generation.cpp
+
+Files added in this version:
+
+  NOTICE
+  docs/inference.md
+  tools/german-frontend/ (German text normalizer and proxy, all files)
+
+A summary of the changes is in the "Changes in this fork" section of
+README.md; docs/inference.md describes them in detail.
+
+tools/german-frontend depends on num2words (LGPL-2.1), which is not
+bundled; it is installed separately from PyPI (see its requirements.txt).
+
+The Breeze-TTS-2 model weights are not covered by the Apache License. They
+are governed by the BreezeBlue Research and Non-Commercial License, see
+https://huggingface.co/BreezeBlue/Breeze-TTS-2.

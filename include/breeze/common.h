@@ -13,6 +13,7 @@ namespace breeze {
 
 // one compute backend (any GPU ggml was built with, else CPU) shared by all graphs
 struct Backend {
+    int cpu_threads = 0;   // cpu backend only, stays 0 on a gpu
     ggml_backend_t backend = nullptr;
     ggml_gallocr_t alloc = nullptr;
     bool is_gpu = false;

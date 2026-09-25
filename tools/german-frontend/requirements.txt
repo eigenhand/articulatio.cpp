@@ -1,0 +1,11 @@
+# german_normalizer.py
+# Pinned: the exact wording of written-out numbers depends on the num2words
+# version, and the golden tests were produced with this one.
+num2words==0.5.14
+
+# proxy.py
+fastapi
+uvicorn
+httpx
+websockets>=14        # new asyncio server API: handler(connection), connection.request.path
+python-multipart
