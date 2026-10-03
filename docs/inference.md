@@ -311,6 +311,15 @@ soon as they are complete; there is no need to split anything yourself.
   `ggml_backend_alloc_ctx_tensors` fails, the buffer is null and the next
   access ends the process via `GGML_ASSERT` in `ggml_view_3d`. That is why
   `BackboneState::ok()` now checks for it.
+- **An aborted piece kept its KV cache.** With `carry_cache`, a piece that
+  was aborted (a WebSocket client disconnecting mid-sentence) left its cache,
+  about 470 MB, allocated with the session's state flag already cleared, so
+  nothing freed it until the process ended; a few aborts filled the card. A
+  second `KVCache::init` also orphaned the first buffer. Both are released
+  now. When no cache could be allocated at all, `backbone_run` did not fail
+  either: ggml gave the cache tensors scratch memory that is gone after every
+  step, so each step decoded without context and the speech came out garbled.
+  Such a piece is now dropped with a log message.
 - **`\uXXXX` in JSON was dropped.** The WebSocket parser silently skipped the
   digits; any client that escapes non-ASCII (Python's `json.dumps` does by
   default) lost every non-ASCII character that way, including ä, ö, ü and

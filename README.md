@@ -63,6 +63,12 @@ Articulatio-DE through the streaming server. It adds:
   from the reference when the next piece might not fit and ends a piece before it would write past
   the end, and if the allocation fails the session falls back to a cache per piece instead of
   aborting.
+- **KV cache released when a piece is aborted.** With `carry_cache`, an aborted piece (for example a
+  WebSocket client that disconnects mid-sentence) used to leave its cache, about 470 MB, allocated
+  until the server restarted, so a few aborts filled the card. It is now released on abort, at the
+  end of a session and before a cache is allocated anew. If the cache for a piece cannot be allocated
+  at all, the piece is dropped with a log message instead of being generated without context, which
+  came out garbled.
 - **Rolling anchor** (`rolling_anchor`, off by default): each piece uses the previously generated
   piece as its reference, rather than the original reference clip.
 - **One piece per sentence on the WebSocket.** Text is no longer sent as one piece up to the last

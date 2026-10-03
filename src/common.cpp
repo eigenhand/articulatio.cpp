@@ -45,6 +45,7 @@ void Backend::free() {
 }
 
 void KVCache::init(Backend & be, int n_layer, int hd, int nkv, int ms, int nb) {
+    free();   // a second init must not orphan the buffer of the first
     head_dim = hd;
     n_kv_head = nkv;
     max_seq = ms;

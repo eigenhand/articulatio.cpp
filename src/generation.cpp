@@ -283,6 +283,17 @@ static bool generate_chunk(BreezeModel & m, MimiCodec & codec, const GenRequest 
                                         : total_u + max_new + 8);
     }
 
+    // without a cache buffer backbone_run does not fail, ggml gives the cache tensors scratch
+    // memory that is gone after every step, so each step decodes without any context and the
+    // speech comes out garbled. drop the piece instead
+    if (!st_c.ok() || (use_cfg && !st_u.ok())) {
+        fprintf(stderr, "[breeze] no device memory for the KV cache (%d positions), piece dropped\n",
+                total_c + max_new + 8);
+        st_c.free();
+        if (use_cfg) st_u.free();
+        return false;
+    }
+
     t0 = clock_now();
     StepOut o_c = backbone_run(m, st_c, emb_c, total_c);
     StepOut o_u;
@@ -428,11 +439,11 @@ static bool generate_chunk(BreezeModel & m, MimiCodec & codec, const GenRequest 
 
 void GenSession::end() {
     m_voc_tail.clear();
-    if (m_state_live) {
-        m_st_c.free();
-        m_st_u.free();
-        m_state_live = false;
-    }
+    // not only when m_state_live: an aborted piece leaves its cache allocated with the flag
+    // already false, and that buffer used to stay in VRAM until the process ended
+    m_st_c.free();
+    m_st_u.free();
+    m_state_live = false;
 }
 
 void GenSession::begin(BreezeModel & m, MimiCodec & codec, const GenRequest & req, GenTimings * tm) {
@@ -499,7 +510,11 @@ bool GenSession::speak(const std::string & text, const AudioCallback & cb, GenTi
     // only resume if the state is really alive. when the large cache did not fit in memory,
     // generate_chunk falls back to a cache per piece and frees it at the end. this used to say
     // "live" regardless, and the next piece would have carried on computing on the freed state
-    if (carry) m_state_live = ok && m_st_c.ok();
+    if (carry) {
+        m_state_live = ok && m_st_c.ok();
+        // an aborted piece leaves a half written cache that nothing resumes from, release it now
+        if (!m_state_live) { m_st_c.free(); m_st_u.free(); }
+    }
     m_piece++;
     // the opening piece stands in as the reference when there was no clip to clone.
     // with rolling_anchor every piece takes over, so each one is conditioned on the
